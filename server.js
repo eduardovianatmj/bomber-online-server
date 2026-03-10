@@ -38,9 +38,11 @@ const rooms = new Map();
 function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
+
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
+
 function roomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -48,12 +50,14 @@ function roomCode() {
   return code;
 }
 
-function createMap(seed = Date.now()) {
+function createMap(seed = Date.now(), density = 0.58) {
   const map = Array.from({ length: GRID_H }, () => Array(GRID_W).fill(0));
 
   for (let y = 0; y < GRID_H; y++) {
     for (let x = 0; x < GRID_W; x++) {
-      if (x === 0 || y === 0 || x === GRID_W - 1 || y === GRID_H - 1) map[y][x] = 1;
+      if (x === 0 || y === 0 || x === GRID_W - 1 || y === GRID_H - 1) {
+        map[y][x] = 1;
+      }
     }
   }
 
@@ -64,8 +68,12 @@ function createMap(seed = Date.now()) {
   }
 
   const spawns = [
-    [1, 1], [GRID_W - 2, 1], [1, GRID_H - 2], [GRID_W - 2, GRID_H - 2],
-    [1, Math.floor(GRID_H / 2)], [GRID_W - 2, Math.floor(GRID_H / 2)]
+    [1, 1],
+    [GRID_W - 2, 1],
+    [1, GRID_H - 2],
+    [GRID_W - 2, GRID_H - 2],
+    [1, Math.floor(GRID_H / 2)],
+    [GRID_W - 2, Math.floor(GRID_H / 2)]
   ];
 
   const safe = new Set();
@@ -84,7 +92,7 @@ function createMap(seed = Date.now()) {
     for (let x = 1; x < GRID_W - 1; x++) {
       if (map[y][x] !== 0) continue;
       if (safe.has(`${x},${y}`)) continue;
-      if (rnd() < 0.58) map[y][x] = 2;
+      if (rnd() < density) map[y][x] = 2;
     }
   }
 
@@ -106,7 +114,7 @@ function makeRoom(hostSocketId) {
       bombFuseMs: 1900,
       breakableDensity: 0.58
     },
-    map: createMap(),
+    map: createMap(Date.now(), 0.58),
     players: {},
     bombs: [],
     explosions: [],
@@ -347,10 +355,8 @@ function updatePlayers(room, dt) {
     player.x = clamp(nx, TILE * 0.5, GRID_W * TILE - TILE * 0.5);
     player.y = clamp(ny, TILE * 0.5, GRID_H * TILE - TILE * 0.5);
 
-    const tx = Math.floor(player.x / TILE);
-    const ty = Math.floor(player.y / TILE);
-    player.tx = tx;
-    player.ty = ty;
+    player.tx = Math.floor(player.x / TILE);
+    player.ty = Math.floor(player.y / TILE);
 
     if (input.bomb) {
       placeBomb(room, player);
@@ -405,6 +411,8 @@ function serializeRoom(room) {
     code: room.code,
     hostId: room.hostId,
     status: room.status,
+    selectedMap: room.selectedMap,
+    settings: room.settings,
     map: room.map,
     players: Object.values(room.players).map(p => ({
       id: p.id,
@@ -420,8 +428,6 @@ function serializeRoom(room) {
       score: p.score,
       color: p.color
     })),
-    selectedMap: room.selectedMap,
-    settings: room.settings,
     bombs: room.bombs.map(b => ({
       tx: b.tx,
       ty: b.ty,
@@ -444,7 +450,7 @@ function broadcastRoom(room) {
 
 function resetMatch(room) {
   room.status = "playing";
-  room.map = createMap();
+  room.map = createMap(Date.now(), room.settings?.breakableDensity || 0.58);
   room.bombs = [];
   room.explosions = [];
   room.powerUps = [];
@@ -453,7 +459,7 @@ function resetMatch(room) {
   const ids = Object.keys(room.players);
   ids.forEach((id, index) => {
     const current = room.players[id];
-    const fresh = makePlayer(id, current.name, index);
+    const fresh = makePlayer(id, current.name, index, current.character || "nova");
     fresh.score = current.score;
     room.players[id] = fresh;
   });
@@ -481,17 +487,83 @@ setInterval(() => {
 }, TICK_RATE);
 
 io.on("connection", (socket) => {
+  socket.on("room:create", ({ name, character, selectedMap, settings }) => {
+    const room = makeRoom(socket.id);
+
+    if (selectedMap) room.selectedMap = selectedMap;
+    if (settings) {
+      room.settings = {
+        ...room.settings,
+        ...settings
+      };
+    }
+
+    room.players[socket.id] = makePlayer(
+      socket.id,
+      name || "Host",
+      0,
+      character || "nova"
+    );
+
+    socket.join(room.code);
+
+    socket.emit("room:joined", {
+      roomCode: room.code,
+      playerId: socket.id,
+      host: true
+    });
+
+    broadcastRoom(room);
+  });
+
+  socket.on("room:join", ({ roomCode, name, character }) => {
+    const room = rooms.get((roomCode || "").toUpperCase());
+
+    if (!room) {
+      socket.emit("error:message", "Sala não encontrada.");
+      return;
+    }
+
+    if (Object.keys(room.players).length >= ROOM_MAX) {
+      socket.emit("error:message", "Sala cheia.");
+      return;
+    }
+
+    if (room.status === "playing") {
+      socket.emit("error:message", "A partida já começou.");
+      return;
+    }
+
+    const index = Object.keys(room.players).length;
+    room.players[socket.id] = makePlayer(
+      socket.id,
+      name || `Player ${index + 1}`,
+      index,
+      character || "nova"
+    );
+
+    socket.join(room.code);
+
+    socket.emit("room:joined", {
+      roomCode: room.code,
+      playerId: socket.id,
+      host: room.hostId === socket.id
+    });
+
+    broadcastRoom(room);
+  });
+
   socket.on("room:update-config", ({ roomCode, selectedMap, settings, character }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
-  
+
     const player = room.players[socket.id];
     if (!player) return;
-  
+
     if (character) {
       player.character = character;
     }
-  
+
     if (room.hostId === socket.id) {
       if (selectedMap) room.selectedMap = selectedMap;
       if (settings) {
@@ -501,44 +573,7 @@ io.on("connection", (socket) => {
         };
       }
     }
-  
-    broadcastRoom(room);
-  });
 
-  socket.on("room:join", ({ roomCode, name, character }) => {
-    const room = rooms.get((roomCode || "").toUpperCase());
-  
-    if (!room) {
-      socket.emit("error:message", "Sala não encontrada.");
-      return;
-    }
-  
-    if (Object.keys(room.players).length >= ROOM_MAX) {
-      socket.emit("error:message", "Sala cheia.");
-      return;
-    }
-  
-    if (room.status === "playing") {
-      socket.emit("error:message", "A partida já começou.");
-      return;
-    }
-  
-    const index = Object.keys(room.players).length;
-    room.players[socket.id] = makePlayer(
-      socket.id,
-      name || `Player ${index + 1}`,
-      index,
-      character || "nova"
-    );
-  
-    socket.join(room.code);
-  
-    socket.emit("room:joined", {
-      roomCode: room.code,
-      playerId: socket.id,
-      host: room.hostId === socket.id
-    });
-  
     broadcastRoom(room);
   });
 
@@ -564,6 +599,7 @@ io.on("connection", (socket) => {
   socket.on("player:input", ({ roomCode, input }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
+
     const player = room.players[socket.id];
     if (!player) return;
 
@@ -582,8 +618,7 @@ io.on("connection", (socket) => {
         delete room.players[socket.id];
 
         if (room.hostId === socket.id) {
-          const nextHost = Object.keys(room.players)[0] || null;
-          room.hostId = nextHost;
+          room.hostId = Object.keys(room.players)[0] || null;
         }
 
         if (Object.keys(room.players).length === 0) {
