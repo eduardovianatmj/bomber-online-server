@@ -1,0 +1,14 @@
+{
+  "name": "bomber-online-server",
+  "version": "1.0.0",
+  "description": "Servidor online do Bomber web com salas e Socket.IO",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.8.1",
+    "cors": "^2.8.5"
+  }
+}
