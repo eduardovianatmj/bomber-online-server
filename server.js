@@ -100,6 +100,12 @@ function makeRoom(hostSocketId) {
     code,
     hostId: hostSocketId,
     status: "lobby",
+    selectedMap: "arena-classic",
+    settings: {
+      roundsToWin: 3,
+      bombFuseMs: 1900,
+      breakableDensity: 0.58
+    },
     map: createMap(),
     players: {},
     bombs: [],
@@ -126,11 +132,12 @@ function getSpawnByIndex(index) {
   return spawns[index] || spawns[0];
 }
 
-function makePlayer(socketId, name, index) {
+function makePlayer(socketId, name, index, character = "nova") {
   const spawn = getSpawnByIndex(index);
   return {
     id: socketId,
     name: name || `Player ${index + 1}`,
+    character,
     x: (spawn.tx + 0.5) * TILE,
     y: (spawn.ty + 0.5) * TILE,
     tx: spawn.tx,
@@ -201,7 +208,7 @@ function placeBomb(room, player) {
     tx,
     ty,
     ownerId: player.id,
-    fuse: 1900,
+    fuse: room.settings?.bombFuseMs || 1900,
     range: player.bombRange,
     createdAt: Date.now(),
     passable: true
@@ -402,6 +409,7 @@ function serializeRoom(room) {
     players: Object.values(room.players).map(p => ({
       id: p.id,
       name: p.name,
+      character: p.character,
       x: p.x,
       y: p.y,
       tx: p.tx,
@@ -412,6 +420,8 @@ function serializeRoom(room) {
       score: p.score,
       color: p.color
     })),
+    selectedMap: room.selectedMap,
+    settings: room.settings,
     bombs: room.bombs.map(b => ({
       tx: b.tx,
       ty: b.ty,
@@ -471,48 +481,64 @@ setInterval(() => {
 }, TICK_RATE);
 
 io.on("connection", (socket) => {
-  socket.on("room:create", ({ name }) => {
-    const room = makeRoom(socket.id);
-    room.players[socket.id] = makePlayer(socket.id, name || "Host", 0);
-    socket.join(room.code);
-
-    socket.emit("room:joined", {
-      roomCode: room.code,
-      playerId: socket.id,
-      host: true
-    });
-
+  socket.on("room:update-config", ({ roomCode, selectedMap, settings, character }) => {
+    const room = rooms.get(roomCode);
+    if (!room) return;
+  
+    const player = room.players[socket.id];
+    if (!player) return;
+  
+    if (character) {
+      player.character = character;
+    }
+  
+    if (room.hostId === socket.id) {
+      if (selectedMap) room.selectedMap = selectedMap;
+      if (settings) {
+        room.settings = {
+          ...room.settings,
+          ...settings
+        };
+      }
+    }
+  
     broadcastRoom(room);
   });
 
-  socket.on("room:join", ({ roomCode, name }) => {
+  socket.on("room:join", ({ roomCode, name, character }) => {
     const room = rooms.get((roomCode || "").toUpperCase());
-
+  
     if (!room) {
       socket.emit("error:message", "Sala não encontrada.");
       return;
     }
-
+  
     if (Object.keys(room.players).length >= ROOM_MAX) {
       socket.emit("error:message", "Sala cheia.");
       return;
     }
-
+  
     if (room.status === "playing") {
       socket.emit("error:message", "A partida já começou.");
       return;
     }
-
+  
     const index = Object.keys(room.players).length;
-    room.players[socket.id] = makePlayer(socket.id, name || `Player ${index + 1}`, index);
+    room.players[socket.id] = makePlayer(
+      socket.id,
+      name || `Player ${index + 1}`,
+      index,
+      character || "nova"
+    );
+  
     socket.join(room.code);
-
+  
     socket.emit("room:joined", {
       roomCode: room.code,
       playerId: socket.id,
       host: room.hostId === socket.id
     });
-
+  
     broadcastRoom(room);
   });
 
